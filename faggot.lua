@@ -1,13 +1,10 @@
 --[[
-    TP NOW
-    Cleaned / fixed Roblox Luau version
-
-    IMPORTANT:
-    - This version is intended for your own Roblox experience.
-    - Config is session-based because HttpService does NOT provide
-      GetAsync/SetAsync. Persistent settings should use DataStoreService
-      from a ServerScript.
-    - Set STEAL_REMOTE_NAME to your own game's RemoteEvent if applicable.
+    TP NOW - Executor Script
+    Features:
+    - Walks closer to base wall before cloning
+    - Loads config on execution
+    - Auto TP functionality
+    - GUI Interface
 ]]
 
 -- ============================================================
@@ -19,6 +16,7 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -28,49 +26,64 @@ local LocalPlayer = Players.LocalPlayer
 
 local function getPlayerGui()
     local gui = LocalPlayer:WaitForChild("PlayerGui", 10)
-
     if not gui then
         warn("[TP NOW] PlayerGui failed to load")
         return nil
     end
-
     return gui
 end
 
 local PlayerGui = getPlayerGui()
-
 if not PlayerGui then
     return
 end
 
 -- ============================================================
--- CONFIG
+-- CONFIG SYSTEM
 -- ============================================================
 
 local configData = {
     autoTPOnLoad = false,
     autoTPEnabled = false,
+    walkToWall = true,
+    wallDistance = 5,
 }
 
--- Session-only configuration.
--- For persistent settings, use DataStoreService on the server.
+-- Load config from global environment (persists across script reloads)
 local function loadConfig()
-    print(
-        "[Config] Loaded: autoTPOnLoad="
-            .. tostring(configData.autoTPOnLoad)
-            .. " autoTPEnabled="
-            .. tostring(configData.autoTPEnabled)
-    )
+    -- Check if config exists in global environment
+    if getgenv and getgenv().TPNOW_Config then
+        local saved = getgenv().TPNOW_Config
+        configData.autoTPOnLoad = saved.autoTPOnLoad or false
+        configData.autoTPEnabled = saved.autoTPEnabled or false
+        configData.walkToWall = saved.walkToWall ~= false
+        configData.wallDistance = saved.wallDistance or 5
+    end
+    
+    -- Also try to load from DataStore (if available)
+    local success, data = pcall(function()
+        if game:GetService("DataStoreService") then
+            -- This won't work client-side, but we'll try anyway
+            return nil
+        end
+    end)
+    
+    print("[TP NOW] Config loaded:")
+    print("  - autoTPOnLoad: " .. tostring(configData.autoTPOnLoad))
+    print("  - autoTPEnabled: " .. tostring(configData.autoTPEnabled))
+    print("  - walkToWall: " .. tostring(configData.walkToWall))
+    print("  - wallDistance: " .. tostring(configData.wallDistance))
 end
 
 local function saveConfig()
-    print(
-        "[Config] Saved: autoTPOnLoad="
-            .. tostring(configData.autoTPOnLoad)
-            .. " autoTPEnabled="
-            .. tostring(configData.autoTPEnabled)
-    )
+    if getgenv then
+        getgenv().TPNOW_Config = configData
+        print("[TP NOW] Config saved to global environment")
+    end
 end
+
+-- Load config immediately
+loadConfig()
 
 -- ============================================================
 -- MONEY FORMATTER
@@ -78,7 +91,6 @@ end
 
 local function fmtMoney(n)
     n = tonumber(n) or 0
-
     if n >= 1e12 then
         return string.format("$%.2fT", n / 1e12)
     elseif n >= 1e9 then
@@ -88,7 +100,6 @@ local function fmtMoney(n)
     elseif n >= 1e3 then
         return string.format("$%.1fK", n / 1e3)
     end
-
     return "$" .. tostring(n)
 end
 
@@ -101,13 +112,8 @@ local function parseGeneration(text)
         return 0
     end
 
-    local clean = tostring(text)
-        :gsub("%$", "")
-        :gsub(",", "")
-        :gsub("%s+", "")
-
+    local clean = tostring(text):gsub("%$", ""):gsub(",", ""):gsub("%s+", "")
     local number, suffix = clean:match("^([%d%.]+)([KMBT]?)")
-
     number = tonumber(number)
 
     if not number then
@@ -115,7 +121,6 @@ local function parseGeneration(text)
     end
 
     local multiplier = 1
-
     if suffix == "K" then
         multiplier = 1e3
     elseif suffix == "M" then
@@ -138,20 +143,14 @@ local function extractGenerationFromPet(petModel)
         return 0, "$0"
     end
 
-    -- Attribute first
     local genAttr = petModel:GetAttribute("Generation")
-
     if typeof(genAttr) == "number" and genAttr > 0 then
         return genAttr, fmtMoney(genAttr)
     end
 
-    -- NumberValue fallback
     for _, child in ipairs(petModel:GetChildren()) do
         if child:IsA("NumberValue") then
-            if child.Name == "Generation"
-                or child.Name == "Value"
-                or child.Name == "Gen"
-            then
+            if child.Name == "Generation" or child.Name == "Value" or child.Name == "Gen" then
                 if child.Value > 0 then
                     return child.Value, fmtMoney(child.Value)
                 end
@@ -159,31 +158,23 @@ local function extractGenerationFromPet(petModel)
         end
     end
 
-    -- Look for overhead information
     local debris = Workspace:FindFirstChild("Debris")
-
     if debris then
         for _, obj in ipairs(debris:GetDescendants()) do
             if obj:IsA("SurfaceGui") and obj.Name == "AnimalOverhead" then
-
                 local generationLabel = obj:FindFirstChild("Generation")
                 local displayNameLabel = obj:FindFirstChild("DisplayName")
 
                 if generationLabel and generationLabel:IsA("TextLabel") then
                     local matchesPet = true
-
-                    if displayNameLabel
-                        and displayNameLabel:IsA("TextLabel")
-                    then
+                    if displayNameLabel and displayNameLabel:IsA("TextLabel") then
                         matchesPet = displayNameLabel.Text == petModel.Name
                     end
 
                     if matchesPet then
                         local generationText = generationLabel.Text
-
                         if generationText and generationText ~= "" then
                             local value = parseGeneration(generationText)
-
                             if value > 0 then
                                 return value, generationText
                             end
@@ -207,18 +198,15 @@ local function getMutation(petModel)
     end
 
     local attrMut = petModel:GetAttribute("Mutation")
-
     if attrMut ~= nil and tostring(attrMut) ~= "" then
         return tostring(attrMut)
     end
 
     local mutObj = petModel:FindFirstChild("Mutation")
-
     if mutObj then
         if mutObj:IsA("StringValue") and mutObj.Value ~= "" then
             return mutObj.Value
         end
-
         if mutObj:IsA("ObjectValue") and mutObj.Value then
             return mutObj.Value.Name
         end
@@ -237,21 +225,16 @@ local function isPlayerBase(plot)
     end
 
     local sign = plot:FindFirstChild("PlotSign")
-
     if sign then
         local yourBase = sign:FindFirstChild("YourBase")
-
         if yourBase then
             if yourBase:IsA("BoolValue") then
                 return yourBase.Value
             end
-
             if yourBase:IsA("GuiObject") then
                 return yourBase.Visible
             end
-
             local enabled = yourBase:GetAttribute("Enabled")
-
             if enabled ~= nil then
                 return enabled == true
             end
@@ -280,7 +263,6 @@ local function getBaseBoundaries(plot)
             local cf = part.CFrame
             local size = part.Size
 
-            -- Bounding-box approximation in world X/Z
             local corners = {
                 cf:PointToWorldSpace(Vector3.new(-size.X / 2, 0, -size.Z / 2)),
                 cf:PointToWorldSpace(Vector3.new(size.X / 2, 0, -size.Z / 2)),
@@ -311,22 +293,16 @@ end
 
 local function isInsideOtherBase(pos, targetPlot)
     local plots = Workspace:FindFirstChild("Plots")
-
     if not plots then
         return false
     end
 
     for _, plot in ipairs(plots:GetChildren()) do
         if plot:IsA("Model") and plot.Name ~= targetPlot then
-
             local boundaries = getBaseBoundaries(plot)
-
             if boundaries then
-                if pos.X >= boundaries.minX
-                    and pos.X <= boundaries.maxX
-                    and pos.Z >= boundaries.minZ
-                    and pos.Z <= boundaries.maxZ
-                then
+                if pos.X >= boundaries.minX and pos.X <= boundaries.maxX and
+                   pos.Z >= boundaries.minZ and pos.Z <= boundaries.maxZ then
                     return true
                 end
             end
@@ -337,22 +313,63 @@ local function isInsideOtherBase(pos, targetPlot)
 end
 
 -- ============================================================
+-- WALL WALKING
+-- ============================================================
+
+local function walkToWall(plot, targetPos)
+    if not configData.walkToWall then
+        return targetPos
+    end
+    
+    if not plot then
+        return targetPos
+    end
+    
+    local boundaries = getBaseBoundaries(plot)
+    if not boundaries then
+        return targetPos
+    end
+    
+    -- Find the closest wall point
+    local wallX = math.clamp(targetPos.X, boundaries.minX + configData.wallDistance, boundaries.maxX - configData.wallDistance)
+    local wallZ = math.clamp(targetPos.Z, boundaries.minZ + configData.wallDistance, boundaries.maxZ - configData.wallDistance)
+    
+    -- Determine which wall is closest
+    local distToXMin = math.abs(targetPos.X - (boundaries.minX + configData.wallDistance))
+    local distToXMax = math.abs(targetPos.X - (boundaries.maxX - configData.wallDistance))
+    local distToZMin = math.abs(targetPos.Z - (boundaries.minZ + configData.wallDistance))
+    local distToZMax = math.abs(targetPos.Z - (boundaries.maxZ - configData.wallDistance))
+    
+    local wallPos = Vector3.new(targetPos.X, targetPos.Y, targetPos.Z)
+    local minDist = math.min(distToXMin, distToXMax, distToZMin, distToZMax)
+    
+    if minDist == distToXMin then
+        wallPos = Vector3.new(boundaries.minX + configData.wallDistance, targetPos.Y, targetPos.Z)
+    elseif minDist == distToXMax then
+        wallPos = Vector3.new(boundaries.maxX - configData.wallDistance, targetPos.Y, targetPos.Z)
+    elseif minDist == distToZMin then
+        wallPos = Vector3.new(targetPos.X, targetPos.Y, boundaries.minZ + configData.wallDistance)
+    else
+        wallPos = Vector3.new(targetPos.X, targetPos.Y, boundaries.maxZ - configData.wallDistance)
+    end
+    
+    return wallPos
+end
+
+-- ============================================================
 -- SAFE PATH
 -- ============================================================
 
 local function segmentHitsBase(a, b, targetPlot)
     local distance = (b - a).Magnitude
-
     if distance <= 0 then
         return isInsideOtherBase(a, targetPlot)
     end
 
     local steps = math.max(2, math.ceil(distance / 10))
-
     for i = 0, steps do
         local alpha = i / steps
         local point = a:Lerp(b, alpha)
-
         if isInsideOtherBase(point, targetPlot) then
             return true
         end
@@ -363,27 +380,16 @@ end
 
 local function getSafePath(startPos, targetPos, targetPlot)
     if not segmentHitsBase(startPos, targetPos, targetPlot) then
-        return {
-            startPos,
-            targetPos,
-        }
+        return {startPos, targetPos}
     end
 
     local offsets = {
-        Vector3.new(15, 0, 0),
-        Vector3.new(-15, 0, 0),
-        Vector3.new(0, 0, 15),
-        Vector3.new(0, 0, -15),
-
-        Vector3.new(25, 0, 25),
-        Vector3.new(-25, 0, 25),
-        Vector3.new(25, 0, -25),
-        Vector3.new(-25, 0, -25),
-
-        Vector3.new(40, 0, 0),
-        Vector3.new(-40, 0, 0),
-        Vector3.new(0, 0, 40),
-        Vector3.new(0, 0, -40),
+        Vector3.new(15, 0, 0), Vector3.new(-15, 0, 0),
+        Vector3.new(0, 0, 15), Vector3.new(0, 0, -15),
+        Vector3.new(25, 0, 25), Vector3.new(-25, 0, 25),
+        Vector3.new(25, 0, -25), Vector3.new(-25, 0, -25),
+        Vector3.new(40, 0, 0), Vector3.new(-40, 0, 0),
+        Vector3.new(0, 0, 40), Vector3.new(0, 0, -40),
     }
 
     local bestPath = nil
@@ -393,30 +399,16 @@ local function getSafePath(startPos, targetPos, targetPlot)
         local p1 = startPos + offset
         local p2 = targetPos + offset
 
-        if not isInsideOtherBase(p1, targetPlot)
-            and not isInsideOtherBase(p2, targetPlot)
-        then
-
-            local valid =
-                not segmentHitsBase(startPos, p1, targetPlot)
-                and not segmentHitsBase(p1, p2, targetPlot)
-                and not segmentHitsBase(p2, targetPos, targetPlot)
+        if not isInsideOtherBase(p1, targetPlot) and not isInsideOtherBase(p2, targetPlot) then
+            local valid = not segmentHitsBase(startPos, p1, targetPlot) and
+                         not segmentHitsBase(p1, p2, targetPlot) and
+                         not segmentHitsBase(p2, targetPos, targetPlot)
 
             if valid then
-                local distance =
-                    (startPos - p1).Magnitude
-                    + (p1 - p2).Magnitude
-                    + (p2 - targetPos).Magnitude
-
+                local distance = (startPos - p1).Magnitude + (p1 - p2).Magnitude + (p2 - targetPos).Magnitude
                 if distance < bestDistance then
                     bestDistance = distance
-
-                    bestPath = {
-                        startPos,
-                        p1,
-                        p2,
-                        targetPos,
-                    }
+                    bestPath = {startPos, p1, p2, targetPos}
                 end
             end
         end
@@ -434,17 +426,10 @@ local function getSafePath(startPos, targetPos, targetPlot)
     )
 
     if not isInsideOtherBase(highPoint, targetPlot) then
-        return {
-            startPos,
-            highPoint,
-            targetPos,
-        }
+        return {startPos, highPoint, targetPos}
     end
 
-    return {
-        startPos,
-        targetPos,
-    }
+    return {startPos, targetPos}
 end
 
 -- ============================================================
@@ -453,9 +438,7 @@ end
 
 local function scanPets()
     local results = {}
-
     local plots = Workspace:FindFirstChild("Plots")
-
     if not plots then
         return results
     end
@@ -463,30 +446,18 @@ local function scanPets()
     local seen = {}
 
     for _, plot in ipairs(plots:GetChildren()) do
-
         if plot:IsA("Model") and not isPlayerBase(plot) then
-
             for _, desc in ipairs(plot:GetDescendants()) do
-
                 if desc:IsA("Model") then
-
-                    local humanoid =
-                        desc:FindFirstChildOfClass("Humanoid")
-
-                    local hrp =
-                        desc:FindFirstChild("HumanoidRootPart")
+                    local humanoid = desc:FindFirstChildOfClass("Humanoid")
+                    local hrp = desc:FindFirstChild("HumanoidRootPart")
 
                     if humanoid or hrp then
-
-                        local gen, genText =
-                            extractGenerationFromPet(desc)
-
+                        local gen, genText = extractGenerationFromPet(desc)
                         if gen > 0 and not seen[desc] then
-
                             seen[desc] = true
 
                             local position
-
                             if hrp and hrp:IsA("BasePart") then
                                 position = hrp.Position
                             else
@@ -528,9 +499,7 @@ local function findStealPrompt(pet)
 
     for _, obj in ipairs(pet.model:GetDescendants()) do
         if obj:IsA("ProximityPrompt") then
-
             local action = string.lower(obj.ActionText or "")
-
             if string.find(action, "steal", 1, true) then
                 return obj
             end
@@ -538,29 +507,21 @@ local function findStealPrompt(pet)
     end
 
     local plots = Workspace:FindFirstChild("Plots")
-
     if not plots then
         return nil
     end
 
     local plot = plots:FindFirstChild(pet.plot)
-
     if not plot then
         return nil
     end
 
     local podiums = plot:FindFirstChild("AnimalPodiums")
-
     if podiums then
         for _, podium in ipairs(podiums:GetChildren()) do
-
             for _, obj in ipairs(podium:GetDescendants()) do
-
                 if obj:IsA("ProximityPrompt") then
-
-                    local action =
-                        string.lower(obj.ActionText or "")
-
+                    local action = string.lower(obj.ActionText or "")
                     if string.find(action, "steal", 1, true) then
                         return obj
                     end
@@ -576,8 +537,6 @@ end
 -- STEAL PROMPT
 -- ============================================================
 
--- This uses the normal Roblox ProximityPrompt API.
--- Put your own server-side steal logic behind the prompt.
 local function fireStealPrompt(prompt)
     if not prompt or not prompt.Parent then
         return false
@@ -588,39 +547,29 @@ local function fireStealPrompt(prompt)
     end
 
     local character = LocalPlayer.Character
-
     if not character then
         return false
     end
 
-    local hrp =
-        character:FindFirstChild("HumanoidRootPart")
-
+    local hrp = character:FindFirstChild("HumanoidRootPart")
     if not hrp then
         return false
     end
 
     local promptParent = prompt.Parent
-
     if promptParent:IsA("BasePart") then
-        local distance =
-            (hrp.Position - promptParent.Position).Magnitude
-
+        local distance = (hrp.Position - promptParent.Position).Magnitude
         if distance > prompt.MaxActivationDistance then
             return false
         end
     end
 
-    -- Normal Roblox prompt interaction should be handled by
-    -- the game's ProximityPrompt / server implementation.
     prompt:InputHoldBegin()
-
     if prompt.HoldDuration > 0 then
         task.wait(prompt.HoldDuration)
     else
         task.wait()
     end
-
     prompt:InputHoldEnd()
 
     return true
@@ -640,13 +589,11 @@ local function createThirdFloorPlatform()
 
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-
     if not hrp then
         return
     end
 
     local pos = hrp.Position
-
     if pos.Y <= 80 and pos.Y >= -20 then
         return
     end
@@ -656,19 +603,12 @@ local function createThirdFloorPlatform()
     thirdFloorPlatform.Parent = Workspace
 
     local platform = Instance.new("Part")
-
     platform.Name = "Platform"
     platform.Size = Vector3.new(200, 1, 200)
-    platform.Position = Vector3.new(
-        pos.X,
-        pos.Y - 3,
-        pos.Z
-    )
-
+    platform.Position = Vector3.new(pos.X, pos.Y - 3, pos.Z)
     platform.Anchored = true
     platform.CanCollide = true
     platform.Transparency = 1
-
     platform.Parent = thirdFloorPlatform
 end
 
@@ -690,14 +630,12 @@ local UPPER = {
         {coord = Vector3.new(-487.134918, 16.850713, -18.094154), facing = "SOUTH"},
         {coord = Vector3.new(-316.300171, 16.850713, -17.845898), facing = "SOUTH"},
     },
-
     C = {
         {coord = Vector3.new(-330.765381, 16.850713, 31.424425), facing = "NORTH"},
         {coord = Vector3.new(-502.989349, 16.850713, 31.172430), facing = "NORTH"},
         {coord = Vector3.new(-489.077087, 16.850713, 89.010147), facing = "SOUTH"},
         {coord = Vector3.new(-330.908936, 16.850713, 88.930145), facing = "SOUTH"},
     },
-
     D = {
         {coord = Vector3.new(-331.264893, 16.850713, 138.209167), facing = "NORTH"},
         {coord = Vector3.new(-487.935181, 16.850713, 138.026321), facing = "NORTH"},
@@ -713,14 +651,12 @@ local LOWER = {
         {coord = Vector3.new(-483.619385, -3.718430, -18.844337), facing = "SOUTH"},
         {coord = Vector3.new(-316.147095, -3.048218, -18.818844), facing = "SOUTH"},
     },
-
     C = {
         {coord = Vector3.new(-335.985413, -3.048218, 32.051426), facing = "NORTH"},
         {coord = Vector3.new(-503.277008, -3.048217, 31.956175), facing = "NORTH"},
         {coord = Vector3.new(-483.749390, -3.048218, 88.147003), facing = "SOUTH"},
         {coord = Vector3.new(-315.793823, -3.048217, 88.163979), facing = "SOUTH"},
     },
-
     D = {
         {coord = Vector3.new(-335.476654, -3.048218, 139.001083), facing = "NORTH"},
         {coord = Vector3.new(-503.710083, -3.048217, 138.989883), facing = "NORTH"},
@@ -743,7 +679,6 @@ local BASES_LOW = {
     [2] = Vector3.new(-476.52, -2, 113.77),
     [3] = Vector3.new(-476.52, -2, 6.18),
     [4] = Vector3.new(-476.52, -2, -101.07),
-
     [5] = Vector3.new(-342.66, -2, 221.45),
     [6] = Vector3.new(-342.66, -2, 113.41),
     [7] = Vector3.new(-342.66, -2, 6.25),
@@ -755,7 +690,6 @@ local BASES_HIGH = {
     [2] = Vector3.new(-479.51, 18, 113.77),
     [3] = Vector3.new(-479.51, 18, 6.18),
     [4] = Vector3.new(-479.51, 18, -101.07),
-
     [5] = Vector3.new(-339.48, 18, 221.45),
     [6] = Vector3.new(-339.48, 18, 113.41),
     [7] = Vector3.new(-339.48, 18, 6.25),
@@ -778,10 +712,8 @@ local function getClosestBaseIdx(pos)
 
     for i = 1, 8 do
         local base = BASES_LOW[i]
-
         local dx = pos.X - base.X
         local dz = pos.Z - base.Z
-
         local distance = dx * dx + dz * dz
 
         if distance < bestDistance then
@@ -794,22 +726,11 @@ local function getClosestBaseIdx(pos)
 end
 
 local function buildFrontCandidate(idx, isUpper, playerZ)
-    local base =
-        isUpper and BASES_HIGH[idx] or BASES_LOW[idx]
+    local base = isUpper and BASES_HIGH[idx] or BASES_LOW[idx]
+    local frontY = isUpper and FRONT_Y_HIGH or FRONT_Y_LOW
+    local frontZ = math.clamp(playerZ - base.Z, -FRONT_Z_CLAMP, FRONT_Z_CLAMP) + base.Z
 
-    local frontY =
-        isUpper and FRONT_Y_HIGH or FRONT_Y_LOW
-
-    local frontZ =
-        math.clamp(
-            playerZ - base.Z,
-            -FRONT_Z_CLAMP,
-            FRONT_Z_CLAMP
-        ) + base.Z
-
-    local coord =
-        Vector3.new(base.X, frontY, frontZ)
-
+    local coord = Vector3.new(base.X, frontY, frontZ)
     local faceDir
 
     if idx <= 4 then
@@ -824,17 +745,12 @@ end
 local function plotSides(coordTable, idx)
     local base = BASES_LOW[idx]
     local isWest = idx <= 4
-
     local output = {}
 
     for _, coords in pairs(coordTable) do
         for _, data in ipairs(coords) do
-
-            local sameSide =
-                ((data.coord.X < COLUMN_SPLIT_X) == isWest)
-
-            local nearBase =
-                math.abs(data.coord.Z - base.Z) < SIDE_NEAR_Z
+            local sameSide = ((data.coord.X < COLUMN_SPLIT_X) == isWest)
+            local nearBase = math.abs(data.coord.Z - base.Z) < SIDE_NEAR_Z
 
             if sameSide and nearBase then
                 output[#output + 1] = data
@@ -852,12 +768,9 @@ local function findClosestCoord(petPos, coordTable)
 
     for skyKey, coords in pairs(coordTable) do
         for _, data in ipairs(coords) do
-
             local c = data.coord
-
             local dx = petPos.X - c.X
             local dz = petPos.Z - c.Z
-
             local distance = math.sqrt(dx * dx + dz * dz)
 
             if distance < bestDistance then
@@ -888,28 +801,22 @@ local CARPET_NAMES = {
 local function equipCarpet()
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-
     if not hum then
         return nil
     end
 
     for _, name in ipairs(CARPET_NAMES) do
-
-        local tool =
-            char:FindFirstChild(name)
-
+        local tool = char:FindFirstChild(name)
         if not tool and LocalPlayer.Backpack then
             tool = LocalPlayer.Backpack:FindFirstChild(name)
         end
 
         if tool and tool:IsA("Tool") then
-
             if tool.Parent ~= char then
                 pcall(function()
                     hum:EquipTool(tool)
                 end)
             end
-
             return tool
         end
     end
@@ -920,7 +827,6 @@ end
 local function carpetEngage()
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-
     if not hum then
         return nil
     end
@@ -930,9 +836,7 @@ local function carpetEngage()
     end)
 
     task.wait(0.1)
-
     local tool = equipCarpet()
-
     task.wait(0.15)
 
     return tool
@@ -946,7 +850,6 @@ local function vZero(hrp)
     if not hrp then
         return
     end
-
     hrp.AssemblyLinearVelocity = Vector3.zero
     hrp.AssemblyAngularVelocity = Vector3.zero
 end
@@ -957,17 +860,10 @@ local function moveToPosition(hrp, target, speed)
     end
 
     speed = speed or 150
-
-    local timeout =
-        math.max(
-            3,
-            (target - hrp.Position).Magnitude / speed + 3
-        )
-
+    local timeout = math.max(3, (target - hrp.Position).Magnitude / speed + 3)
     local started = os.clock()
 
     while hrp.Parent and os.clock() - started < timeout do
-
         local diff = target - hrp.Position
         local distance = diff.Magnitude
 
@@ -977,24 +873,18 @@ local function moveToPosition(hrp, target, speed)
         end
 
         local direction = diff.Unit
-
-        hrp.AssemblyLinearVelocity =
-            direction * speed
-
-        hrp.AssemblyAngularVelocity =
-            Vector3.zero
+        hrp.AssemblyLinearVelocity = direction * speed
+        hrp.AssemblyAngularVelocity = Vector3.zero
 
         RunService.Heartbeat:Wait()
     end
 
     vZero(hrp)
-
     return false
 end
 
 local function followPath(hrp, path)
     for i = 2, #path do
-
         if not hrp or not hrp.Parent then
             return false
         end
@@ -1007,7 +897,6 @@ local function followPath(hrp, path)
     end
 
     vZero(hrp)
-
     return true
 end
 
@@ -1017,20 +906,16 @@ end
 
 local function findQuantumCloner()
     local char = LocalPlayer.Character
-
     if char then
         local tool = char:FindFirstChild("Quantum Cloner")
-
         if tool and tool:IsA("Tool") then
             return tool
         end
     end
 
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-
     if backpack then
         local tool = backpack:FindFirstChild("Quantum Cloner")
-
         if tool and tool:IsA("Tool") then
             return tool
         end
@@ -1049,34 +934,24 @@ local function doFullTPThenClone(destPos, facingDir)
     end
 
     print("[TP] Engaging carpet")
-
     carpetEngage()
     vZero(hrp)
-
     task.wait(0.2)
 
-    -- Move using the normal character physics system.
     local reached = moveToPosition(hrp, destPos, 150)
-
     if not reached then
         warn("[TP] Failed to reach clone position")
         return false
     end
 
     if hrp.Parent then
-        hrp.CFrame =
-            CFrame.lookAt(
-                hrp.Position,
-                hrp.Position + facingDir
-            )
-
+        hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + facingDir)
         vZero(hrp)
     end
 
     task.wait(0.3)
 
     local cloner = findQuantumCloner()
-
     if not cloner then
         warn("[TP] Quantum Cloner not found")
         return false
@@ -1086,39 +961,23 @@ local function doFullTPThenClone(destPos, facingDir)
         pcall(function()
             hum:EquipTool(cloner)
         end)
-
         task.wait(0.15)
     end
 
     print("[TP] Activating Quantum Cloner")
-
     pcall(function()
         cloner:Activate()
     end)
 
     task.wait(0.2)
 
-    -- Your own game's clone system should handle the actual
-    -- teleport through its server-side implementation.
-    local toolsFrames =
-        PlayerGui:FindFirstChild("ToolsFrames")
-
+    local toolsFrames = PlayerGui:FindFirstChild("ToolsFrames")
     if toolsFrames then
-
-        local quantum =
-            toolsFrames:FindFirstChild("QuantumCloner")
-
+        local quantum = toolsFrames:FindFirstChild("QuantumCloner")
         if quantum then
-
-            local teleportButton =
-                quantum:FindFirstChild("TeleportToClone")
-
-            if teleportButton
-                and teleportButton:IsA("GuiButton")
-            then
-
+            local teleportButton = quantum:FindFirstChild("TeleportToClone")
+            if teleportButton and teleportButton:IsA("GuiButton") then
                 teleportButton.Visible = true
-
                 print("[TP] Clone UI available")
             end
         end
@@ -1146,20 +1005,17 @@ local function ShowNotification(titleText, bodyText)
     end
 
     local old = PlayerGui:FindFirstChild("MiniNotif")
-
     if old then
         old:Destroy()
     end
 
     local sg = Instance.new("ScreenGui")
-
     sg.Name = "MiniNotif"
     sg.ResetOnSpawn = false
     sg.IgnoreGuiInset = true
     sg.Parent = PlayerGui
 
     local frame = Instance.new("Frame")
-
     frame.Size = UDim2.new(0, 290, 0, 54)
     frame.Position = UDim2.new(0.5, -145, 0, 80)
     frame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
@@ -1171,7 +1027,6 @@ local function ShowNotification(titleText, bodyText)
     corner.Parent = frame
 
     local title = Instance.new("TextLabel")
-
     title.Size = UDim2.new(1, -22, 0, 18)
     title.Position = UDim2.new(0, 16, 0, 7)
     title.BackgroundTransparency = 1
@@ -1183,7 +1038,6 @@ local function ShowNotification(titleText, bodyText)
     title.Parent = frame
 
     local body = Instance.new("TextLabel")
-
     body.Size = UDim2.new(1, -22, 0, 15)
     body.Position = UDim2.new(0, 16, 0, 27)
     body.BackgroundTransparency = 1
@@ -1213,277 +1067,154 @@ local function TPNow()
     isTeleporting = true
 
     task.spawn(function()
-
         local success, err = xpcall(function()
-
             print("")
             print("[TP] ===========================")
             print("[TP] STARTING")
             print("[TP] ===========================")
 
             local char = LocalPlayer.Character
-            local hrp =
-                char and char:FindFirstChild("HumanoidRootPart")
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
             if not char or not hrp then
-                ShowNotification(
-                    "TP NOW",
-                    "Character not ready"
-                )
-
+                ShowNotification("TP NOW", "Character not ready")
                 return
             end
 
-            if hrp.Position.Y > 80
-                or hrp.Position.Y < -20
-            then
+            if hrp.Position.Y > 80 or hrp.Position.Y < -20 then
                 createThirdFloorPlatform()
             else
                 removeThirdFloorPlatform()
             end
 
             print("[TP] Scanning pets")
-
             local pets = scanPets()
 
             if #pets == 0 then
-                ShowNotification(
-                    "TP NOW",
-                    "No pets found"
-                )
-
+                ShowNotification("TP NOW", "No pets found")
                 return
             end
 
             local target = pets[1]
-
             if not target or not target.position then
-                ShowNotification(
-                    "TP NOW",
-                    "No valid target"
-                )
-
+                ShowNotification("TP NOW", "No valid target")
                 return
             end
 
-            print(
-                string.format(
-                    "[TP] Target: %s | %s | %s",
-                    target.name,
-                    target.genText,
-                    target.plot
-                )
-            )
-
-            ShowNotification(
-                "TP NOW",
-                "Target: "
-                    .. target.name
-                    .. " ("
-                    .. target.genText
-                    .. ")"
-            )
+            print(string.format("[TP] Target: %s | %s | %s", target.name, target.genText, target.plot))
+            ShowNotification("TP NOW", "Target: " .. target.name .. " (" .. target.genText .. ")")
 
             local petPos = target.position
-
             local adjustedY = petPos.Y
 
             if TALL_PETS[target.name] then
-                adjustedY =
-                    petPos.Y - TALL_OFFSET
+                adjustedY = petPos.Y - TALL_OFFSET
             end
 
             local coordTable
-
             if adjustedY > UPPER_Y_THRESHOLD then
                 coordTable = UPPER
             else
                 coordTable = LOWER
             end
 
-            local isUpper =
-                coordTable == UPPER
-
-            local closestData =
-                findClosestCoord(
-                    petPos,
-                    coordTable
-                )
+            local isUpper = coordTable == UPPER
+            local closestData = findClosestCoord(petPos, coordTable)
 
             if not closestData then
-                ShowNotification(
-                    "TP NOW",
-                    "No TP coordinate"
-                )
-
+                ShowNotification("TP NOW", "No TP coordinate")
                 return
             end
 
-            local idx =
-                getClosestBaseIdx(petPos)
-
-            local frontCoord, frontFace =
-                buildFrontCandidate(
-                    idx,
-                    isUpper,
-                    hrp.Position.Z
-                )
+            local idx = getClosestBaseIdx(petPos)
+            local frontCoord, frontFace = buildFrontCandidate(idx, isUpper, hrp.Position.Z)
 
             local bestCoord = frontCoord
             local bestFace = frontFace
+            local bestDist = (hrp.Position - frontCoord).Magnitude
 
-            local bestDist =
-                (hrp.Position - frontCoord).Magnitude
-
-            for _, data in ipairs(
-                plotSides(coordTable, idx)
-            ) do
-
-                local distance =
-                    (hrp.Position - data.coord).Magnitude
-
+            for _, data in ipairs(plotSides(coordTable, idx)) do
+                local distance = (hrp.Position - data.coord).Magnitude
                 if distance < bestDist then
                     bestDist = distance
                     bestCoord = data.coord
-
                     if data.facing == "NORTH" then
-                        bestFace =
-                            Vector3.new(0, 0, -1)
+                        bestFace = Vector3.new(0, 0, -1)
                     else
-                        bestFace =
-                            Vector3.new(0, 0, 1)
+                        bestFace = Vector3.new(0, 0, 1)
                     end
                 end
             end
 
-            print(
-                "[TP] Clone position: "
-                    .. tostring(bestCoord)
-            )
+            -- Apply wall walking to clone position
+            local plots = Workspace:FindFirstChild("Plots")
+            if plots then
+                local plot = plots:FindFirstChild(target.plot)
+                if plot then
+                    bestCoord = walkToWall(plot, bestCoord)
+                    print("[TP] Adjusted position to wall: " .. tostring(bestCoord))
+                end
+            end
+
+            print("[TP] Clone position: " .. tostring(bestCoord))
 
             local cloneSuccess = false
-
             for attempt = 1, 3 do
-
-                print(
-                    "[TP] Clone attempt "
-                        .. tostring(attempt)
-                )
-
-                cloneSuccess =
-                    doFullTPThenClone(
-                        bestCoord,
-                        bestFace
-                    )
-
+                print("[TP] Clone attempt " .. tostring(attempt))
+                cloneSuccess = doFullTPThenClone(bestCoord, bestFace)
                 if cloneSuccess then
                     break
                 end
-
                 task.wait(0.5)
             end
 
             if not cloneSuccess then
-                ShowNotification(
-                    "TP NOW",
-                    "Clone failed"
-                )
-
+                ShowNotification("TP NOW", "Clone failed")
                 return
             end
 
-            ShowNotification(
-                "TP NOW",
-                "Navigating to "
-                    .. target.name
-            )
-
+            ShowNotification("TP NOW", "Navigating to " .. target.name)
             task.wait(0.3)
 
             char = LocalPlayer.Character
-            hrp =
-                char and char:FindFirstChild(
-                    "HumanoidRootPart"
-                )
+            hrp = char and char:FindFirstChild("HumanoidRootPart")
 
             if not hrp then
                 return
             end
 
-            local targetPos =
-                Vector3.new(
-                    petPos.X,
-                    petPos.Y + 3,
-                    petPos.Z
-                )
+            local targetPos = Vector3.new(petPos.X, petPos.Y + 3, petPos.Z)
+            local path = getSafePath(hrp.Position, targetPos, target.plot)
 
-            local path =
-                getSafePath(
-                    hrp.Position,
-                    targetPos,
-                    target.plot
-                )
-
-            print(
-                "[TP] Path waypoints: "
-                    .. tostring(#path)
-            )
-
-            local reached =
-                followPath(hrp, path)
+            print("[TP] Path waypoints: " .. tostring(#path))
+            local reached = followPath(hrp, path)
 
             if not reached then
-                ShowNotification(
-                    "TP NOW",
-                    "Could not reach target"
-                )
-
+                ShowNotification("TP NOW", "Could not reach target")
                 return
             end
 
             vZero(hrp)
-
             task.wait(0.3)
 
-            local prompt =
-                findStealPrompt(target)
-
+            local prompt = findStealPrompt(target)
             if not prompt then
-                ShowNotification(
-                    "TP NOW",
-                    "No steal prompt found"
-                )
-
+                ShowNotification("TP NOW", "No steal prompt found")
                 return
             end
 
             isStealing = true
+            ShowNotification("TP NOW", "Interacting with " .. target.name)
 
-            ShowNotification(
-                "TP NOW",
-                "Interacting with "
-                    .. target.name
-            )
-
-            local promptSuccess =
-                fireStealPrompt(prompt)
-
+            local promptSuccess = fireStealPrompt(prompt)
             if promptSuccess then
-                ShowNotification(
-                    "TP NOW",
-                    "Prompt activated"
-                )
+                ShowNotification("TP NOW", "Prompt activated")
             else
-                ShowNotification(
-                    "TP NOW",
-                    "Prompt unavailable"
-                )
+                ShowNotification("TP NOW", "Prompt unavailable")
             end
 
             task.wait(0.5)
-
             isStealing = false
-
             removeThirdFloorPlatform()
 
             print("[TP] COMPLETE")
@@ -1493,12 +1224,7 @@ local function TPNow()
         if not success then
             warn("[TP NOW ERROR]")
             warn(err)
-
-            ShowNotification(
-                "TP NOW",
-                "Error - check console"
-            )
-
+            ShowNotification("TP NOW", "Error - check console")
             isStealing = false
             removeThirdFloorPlatform()
         end
@@ -1507,7 +1233,7 @@ local function TPNow()
     end)
 end
 
--- Make it global if your other scripts call TPNow.
+-- Make it global
 _G.TPNow = TPNow
 
 -- ============================================================
@@ -1520,25 +1246,18 @@ local function startAutoTP()
     end
 
     autoTPThread = task.spawn(function()
-
         while autoTPEnabled do
-
-            if not isTeleporting
-                and not isStealing
-            then
+            if not isTeleporting and not isStealing then
                 TPNow()
             end
-
             task.wait(15)
         end
-
         autoTPThread = nil
     end)
 end
 
 local function stopAutoTP()
     autoTPEnabled = false
-
     if autoTPThread then
         task.cancel(autoTPThread)
         autoTPThread = nil
@@ -1549,25 +1268,19 @@ end
 -- GUI
 -- ============================================================
 
-loadConfig()
-
-local oldGui =
-    PlayerGui:FindFirstChild("TPNOW_GUI")
-
+local oldGui = PlayerGui:FindFirstChild("TPNOW_GUI")
 if oldGui then
     oldGui:Destroy()
 end
 
 local gui = Instance.new("ScreenGui")
-
 gui.Name = "TPNOW_GUI"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = PlayerGui
 
 local frame = Instance.new("Frame")
-
-frame.Size = UDim2.new(0, 210, 0, 240)
+frame.Size = UDim2.new(0, 210, 0, 270)
 frame.Position = UDim2.new(0.5, -105, 0.15, 0)
 frame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
 frame.BackgroundTransparency = 0.05
@@ -1588,7 +1301,6 @@ stroke.Parent = frame
 -- ============================================================
 
 local title = Instance.new("TextLabel")
-
 title.Size = UDim2.new(1, 0, 0, 30)
 title.BackgroundTransparency = 1
 title.Text = "TP NOW"
@@ -1598,7 +1310,6 @@ title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.Parent = frame
 
 local subtitle = Instance.new("TextLabel")
-
 subtitle.Size = UDim2.new(1, -20, 0, 20)
 subtitle.Position = UDim2.new(0, 10, 0, 32)
 subtitle.BackgroundTransparency = 1
@@ -1614,7 +1325,6 @@ subtitle.Parent = frame
 -- ============================================================
 
 local btn = Instance.new("TextButton")
-
 btn.Size = UDim2.new(1, -20, 0, 40)
 btn.Position = UDim2.new(0, 10, 0, 60)
 btn.BackgroundColor3 = Color3.fromRGB(52, 211, 153)
@@ -1630,13 +1340,11 @@ btnCorner.CornerRadius = UDim.new(0, 10)
 btnCorner.Parent = btn
 
 btn.MouseEnter:Connect(function()
-    btn.BackgroundColor3 =
-        Color3.fromRGB(80, 230, 180)
+    btn.BackgroundColor3 = Color3.fromRGB(80, 230, 180)
 end)
 
 btn.MouseLeave:Connect(function()
-    btn.BackgroundColor3 =
-        Color3.fromRGB(52, 211, 153)
+    btn.BackgroundColor3 = Color3.fromRGB(52, 211, 153)
 end)
 
 btn.Activated:Connect(function()
@@ -1648,7 +1356,6 @@ end)
 -- ============================================================
 
 local autoBtn = Instance.new("TextButton")
-
 autoBtn.Size = UDim2.new(1, -20, 0, 35)
 autoBtn.Position = UDim2.new(0, 10, 0, 108)
 autoBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
@@ -1665,47 +1372,27 @@ autoCorner.Parent = autoBtn
 
 local function updateAutoButton()
     if autoTPEnabled then
-        autoBtn.BackgroundColor3 =
-            Color3.fromRGB(30, 80, 60)
-
+        autoBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
         autoBtn.Text = "AUTO TP: ON"
-
-        autoBtn.TextColor3 =
-            Color3.fromRGB(100, 255, 150)
+        autoBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
     else
-        autoBtn.BackgroundColor3 =
-            Color3.fromRGB(30, 30, 40)
-
+        autoBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
         autoBtn.Text = "AUTO TP: OFF"
-
-        autoBtn.TextColor3 =
-            Color3.fromRGB(150, 150, 150)
+        autoBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
     end
 end
 
 autoBtn.Activated:Connect(function()
     autoTPEnabled = not autoTPEnabled
-
-    configData.autoTPEnabled =
-        autoTPEnabled
-
+    configData.autoTPEnabled = autoTPEnabled
     saveConfig()
-
     updateAutoButton()
 
     if autoTPEnabled then
-        ShowNotification(
-            "AUTO TP",
-            "Enabled - every 15 seconds"
-        )
-
+        ShowNotification("AUTO TP", "Enabled - every 15 seconds")
         startAutoTP()
     else
-        ShowNotification(
-            "AUTO TP",
-            "Disabled"
-        )
-
+        ShowNotification("AUTO TP", "Disabled")
         stopAutoTP()
     end
 end)
@@ -1715,7 +1402,6 @@ end)
 -- ============================================================
 
 local loadBtn = Instance.new("TextButton")
-
 loadBtn.Size = UDim2.new(1, -20, 0, 30)
 loadBtn.Position = UDim2.new(0, 10, 0, 150)
 loadBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
@@ -1732,44 +1418,68 @@ loadCorner.Parent = loadBtn
 
 local function updateLoadButton()
     if configData.autoTPOnLoad then
-        loadBtn.BackgroundColor3 =
-            Color3.fromRGB(30, 80, 60)
-
+        loadBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
         loadBtn.Text = "AUTO ON LOAD: ON"
-
-        loadBtn.TextColor3 =
-            Color3.fromRGB(100, 255, 150)
+        loadBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
     else
-        loadBtn.BackgroundColor3 =
-            Color3.fromRGB(30, 30, 40)
-
+        loadBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
         loadBtn.Text = "AUTO ON LOAD: OFF"
-
-        loadBtn.TextColor3 =
-            Color3.fromRGB(150, 150, 150)
+        loadBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
     end
 end
 
 updateLoadButton()
 
 loadBtn.Activated:Connect(function()
-    configData.autoTPOnLoad =
-        not configData.autoTPOnLoad
-
+    configData.autoTPOnLoad = not configData.autoTPOnLoad
     saveConfig()
     updateLoadButton()
 
     if configData.autoTPOnLoad then
-        ShowNotification(
-            "AUTO ON LOAD",
-            "Will TP when loaded"
-        )
+        ShowNotification("AUTO ON LOAD", "Will TP when loaded")
     else
-        ShowNotification(
-            "AUTO ON LOAD",
-            "Disabled"
-        )
+        ShowNotification("AUTO ON LOAD", "Disabled")
     end
+end)
+
+-- ============================================================
+-- WALL WALKING TOGGLE
+-- ============================================================
+
+local wallBtn = Instance.new("TextButton")
+wallBtn.Size = UDim2.new(1, -20, 0, 30)
+wallBtn.Position = UDim2.new(0, 10, 0, 187)
+wallBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+wallBtn.Text = "WALL WALK: " .. (configData.walkToWall and "ON" or "OFF")
+wallBtn.Font = Enum.Font.GothamMedium
+wallBtn.TextSize = 11
+wallBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+wallBtn.AutoButtonColor = false
+wallBtn.Parent = frame
+
+local wallCorner = Instance.new("UICorner")
+wallCorner.CornerRadius = UDim.new(0, 8)
+wallCorner.Parent = wallBtn
+
+local function updateWallButton()
+    if configData.walkToWall then
+        wallBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
+        wallBtn.Text = "WALL WALK: ON"
+        wallBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
+    else
+        wallBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        wallBtn.Text = "WALL WALK: OFF"
+        wallBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    end
+end
+
+updateWallButton()
+
+wallBtn.Activated:Connect(function()
+    configData.walkToWall = not configData.walkToWall
+    saveConfig()
+    updateWallButton()
+    ShowNotification("WALL WALK", configData.walkToWall and "Enabled" or "Disabled")
 end)
 
 -- ============================================================
@@ -1777,9 +1487,8 @@ end)
 -- ============================================================
 
 local status = Instance.new("TextLabel")
-
 status.Size = UDim2.new(1, -20, 0, 20)
-status.Position = UDim2.new(0, 10, 0, 188)
+status.Position = UDim2.new(0, 10, 0, 224)
 status.BackgroundTransparency = 1
 status.Text = "Ready"
 status.Font = Enum.Font.GothamMedium
@@ -1793,9 +1502,8 @@ status.Parent = frame
 -- ============================================================
 
 local floorLabel = Instance.new("TextLabel")
-
 floorLabel.Size = UDim2.new(1, -20, 0, 18)
-floorLabel.Position = UDim2.new(0, 10, 0, 212)
+floorLabel.Position = UDim2.new(0, 10, 0, 248)
 floorLabel.BackgroundTransparency = 1
 floorLabel.Text = "Floor: Ground"
 floorLabel.Font = Enum.Font.GothamMedium
@@ -1809,82 +1517,41 @@ floorLabel.Parent = frame
 -- ============================================================
 
 task.spawn(function()
-
     while gui.Parent do
-
         if isTeleporting then
-
             status.Text = "Teleporting..."
-            status.TextColor3 =
-                Color3.fromRGB(255, 150, 100)
-
+            status.TextColor3 = Color3.fromRGB(255, 150, 100)
         elseif isStealing then
-
             status.Text = "Interacting..."
-            status.TextColor3 =
-                Color3.fromRGB(255, 150, 100)
-
+            status.TextColor3 = Color3.fromRGB(255, 150, 100)
         else
-
             local pets = scanPets()
-
             if #pets > 0 then
-
-                status.Text =
-                    "Best: "
-                    .. pets[1].name
-                    .. " ("
-                    .. pets[1].genText
-                    .. ")"
-
-                status.TextColor3 =
-                    Color3.fromRGB(160, 160, 180)
+                status.Text = "Best: " .. pets[1].name .. " (" .. pets[1].genText .. ")"
+                status.TextColor3 = Color3.fromRGB(160, 160, 180)
             else
-
                 status.Text = "Scanning..."
-
-                status.TextColor3 =
-                    Color3.fromRGB(80, 80, 100)
+                status.TextColor3 = Color3.fromRGB(80, 80, 100)
             end
         end
 
         local char = LocalPlayer.Character
-        local hrp =
-            char and char:FindFirstChild(
-                "HumanoidRootPart"
-            )
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
         if hrp then
-
             local y = hrp.Position.Y
-
             if y > 80 then
-
                 floorLabel.Text = "Floor: 3rd"
-
-                floorLabel.TextColor3 =
-                    Color3.fromRGB(200, 150, 100)
-
+                floorLabel.TextColor3 = Color3.fromRGB(200, 150, 100)
             elseif y > 20 then
-
                 floorLabel.Text = "Floor: 2nd"
-
-                floorLabel.TextColor3 =
-                    Color3.fromRGB(150, 200, 150)
-
+                floorLabel.TextColor3 = Color3.fromRGB(150, 200, 150)
             elseif y > -10 then
-
                 floorLabel.Text = "Floor: Ground"
-
-                floorLabel.TextColor3 =
-                    Color3.fromRGB(60, 60, 80)
-
+                floorLabel.TextColor3 = Color3.fromRGB(60, 60, 80)
             else
-
                 floorLabel.Text = "Floor: Basement"
-
-                floorLabel.TextColor3 =
-                    Color3.fromRGB(100, 100, 150)
+                floorLabel.TextColor3 = Color3.fromRGB(100, 100, 150)
             end
         end
 
@@ -1901,10 +1568,7 @@ local dragStart
 local startPos
 
 frame.InputBegan:Connect(function(input)
-
-    if input.UserInputType
-        == Enum.UserInputType.MouseButton1
-    then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = true
         dragStart = input.Position
         startPos = frame.Position
@@ -1912,36 +1576,27 @@ frame.InputBegan:Connect(function(input)
 end)
 
 frame.InputEnded:Connect(function(input)
-
-    if input.UserInputType
-        == Enum.UserInputType.MouseButton1
-    then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = false
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-
     if not dragging then
         return
     end
 
-    if input.UserInputType
-        ~= Enum.UserInputType.MouseMovement
-    then
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement then
         return
     end
 
-    local delta =
-        input.Position - dragStart
-
-    frame.Position =
-        UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
+    local delta = input.Position - dragStart
+    frame.Position = UDim2.new(
+        startPos.X.Scale,
+        startPos.X.Offset + delta.X,
+        startPos.Y.Scale,
+        startPos.Y.Offset + delta.Y
+    )
 end)
 
 -- ============================================================
@@ -1949,15 +1604,9 @@ end)
 -- ============================================================
 
 task.spawn(function()
-
     if configData.autoTPOnLoad then
-
-        print(
-            "[Config] Auto TP on load enabled"
-        )
-
+        print("[TP NOW] Auto TP on load enabled")
         task.wait(3)
-
         if LocalPlayer.Character then
             TPNow()
         end
@@ -1965,3 +1614,4 @@ task.spawn(function()
 end)
 
 print("[TP NOW] Loaded successfully")
+print("[TP NOW] Config loaded from global environment")
