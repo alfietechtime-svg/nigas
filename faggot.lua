@@ -15,7 +15,6 @@ local PlayerGui
 local function waitForPlayerGui()
     print("[PlayerGui] Waiting for PlayerGui to load...")
     
-    -- First wait for it to exist
     local attempts = 0
     while attempts < 50 do
         PlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -33,7 +32,6 @@ local function waitForPlayerGui()
         PlayerGui.IgnoreGuiInset = true
     end
     
-    -- Wait for it to be fully ready
     local isReady = false
     local waitAttempts = 0
     while not isReady and waitAttempts < 30 do
@@ -44,7 +42,6 @@ local function waitForPlayerGui()
         end
     end
     
-    -- Ensure it can have children
     if PlayerGui and not PlayerGui:FindFirstChild("_ReadyCheck") then
         local check = Instance.new("BoolValue")
         check.Name = "_ReadyCheck"
@@ -57,7 +54,6 @@ local function waitForPlayerGui()
     return PlayerGui
 end
 
--- Load PlayerGui with proper waiting
 PlayerGui = waitForPlayerGui()
 
 -- ============================================================
@@ -66,10 +62,10 @@ PlayerGui = waitForPlayerGui()
 local CONFIG_KEY = "TPNOW_Config"
 local configData = {
     autoTPOnLoad = false,
-    autoTPEnabled = false
+    autoTPEnabled = false,
+    selectedPet = nil -- Store selected pet UID
 }
 
--- Load config from HttpService (persistent across sessions)
 local function loadConfig()
     print("[Config] Loading config...")
     local success, data = pcall(function()
@@ -81,14 +77,17 @@ local function loadConfig()
         if decoded then
             configData.autoTPOnLoad = decoded.autoTPOnLoad or false
             configData.autoTPEnabled = decoded.autoTPEnabled or false
+            configData.selectedPet = decoded.selectedPet or nil
             print("[Config] Loaded: autoTPOnLoad=" .. tostring(configData.autoTPOnLoad) .. ", autoTPEnabled=" .. tostring(configData.autoTPEnabled))
+            if configData.selectedPet then
+                print("[Config] Selected pet: " .. configData.selectedPet)
+            end
         end
     else
         print("[Config] No saved config found, using defaults")
     end
 end
 
--- Save config to HttpService
 local function saveConfig()
     local success, err = pcall(function()
         local json = HttpService:JSONEncode(configData)
@@ -192,14 +191,13 @@ local function isPlayerBase(plot)
     return false
 end
 
--- GET BASE BOUNDARIES (to avoid walking through bases)
+-- GET BASE BOUNDARIES
 local function getBaseBoundaries(plotName)
     local plots = Workspace:FindFirstChild("Plots")
     if not plots then return nil end
     local plot = plots:FindFirstChild(plotName)
     if not plot then return nil end
 
-    -- Get the base's bounding box
     local minX, maxX = math.huge, -math.huge
     local minZ, maxZ = math.huge, -math.huge
 
@@ -219,7 +217,6 @@ local function getBaseBoundaries(plotName)
     return {minX = minX, maxX = maxX, minZ = minZ, maxZ = maxZ}
 end
 
--- Check if a position is inside any base (except the target base)
 local function isInsideOtherBase(pos, targetPlot)
     local plots = Workspace:FindFirstChild("Plots")
     if not plots then return false end
@@ -238,34 +235,24 @@ local function isInsideOtherBase(pos, targetPlot)
     return false
 end
 
--- Get safe path to pet (avoiding other bases)
 local function getSafePath(startPos, targetPos, targetPlot)
     local path = {startPos}
     local currentPos = startPos
 
-    -- Direct path check
     local midPos = (startPos + targetPos) / 2
     if not isInsideOtherBase(midPos, targetPlot) then
-        -- Direct path is safe
         table.insert(path, targetPos)
         return path
     end
 
-    -- Find path around bases
-    local waypoints = {}
     local plots = Workspace:FindFirstChild("Plots")
     if not plots then return {startPos, targetPos} end
 
-    -- Try different offset directions
     local offsets = {
-        Vector3.new(10, 0, 0),
-        Vector3.new(-10, 0, 0),
-        Vector3.new(0, 0, 10),
-        Vector3.new(0, 0, -10),
-        Vector3.new(15, 0, 15),
-        Vector3.new(-15, 0, 15),
-        Vector3.new(15, 0, -15),
-        Vector3.new(-15, 0, -15),
+        Vector3.new(10, 0, 0), Vector3.new(-10, 0, 0),
+        Vector3.new(0, 0, 10), Vector3.new(0, 0, -10),
+        Vector3.new(15, 0, 15), Vector3.new(-15, 0, 15),
+        Vector3.new(15, 0, -15), Vector3.new(-15, 0, -15),
     }
 
     local bestPath = nil
@@ -277,7 +264,6 @@ local function getSafePath(startPos, targetPos, targetPlot)
         local p2 = targetPos + offset
         
         if not isInsideOtherBase(p1, targetPlot) and not isInsideOtherBase(p2, targetPlot) then
-            -- Check if path between waypoints is clear
             local mid1 = (startPos + p1) / 2
             local mid2 = (p1 + p2) / 2
             local mid3 = (p2 + targetPos) / 2
@@ -303,7 +289,6 @@ local function getSafePath(startPos, targetPos, targetPlot)
         return bestPath
     end
 
-    -- Fallback: go high and come down
     local highPoint = Vector3.new(
         (startPos.X + targetPos.X) / 2,
         startPos.Y + 20,
@@ -314,20 +299,17 @@ local function getSafePath(startPos, targetPos, targetPlot)
         return {startPos, highPoint, targetPos}
     end
 
-    -- Final fallback: just direct path
     return {startPos, targetPos}
 end
 
--- WORKING SCANNER
+-- SCAN PETS
 local function scanPets()
     local results = {}
     local plots = Workspace:FindFirstChild("Plots")
     if not plots then return results end
 
     for _, plot in ipairs(plots:GetChildren()) do
-        if not plot:IsA("Model") then
-            -- skip
-        elseif not isPlayerBase(plot) then
+        if plot:IsA("Model") and not isPlayerBase(plot) then
             for _, desc in ipairs(plot:GetDescendants()) do
                 if desc:IsA("Model") then
                     local hasHumanoid = desc:FindFirstChildOfClass("Humanoid")
@@ -409,13 +391,11 @@ local function fireStealPrompt(prompt)
 end
 
 -- ============================================================
--- 3RD FLOOR PLATFORM (NO CAMERA NOCLIP)
+-- 3RD FLOOR PLATFORM
 -- ============================================================
-
 local thirdFloorPlatform = nil
 local platformParts = {}
 
--- Create platform for 3rd floor
 local function createThirdFloorPlatform()
     if thirdFloorPlatform then
         thirdFloorPlatform:Destroy()
@@ -431,11 +411,8 @@ local function createThirdFloorPlatform()
     local isThirdFloor = pos.Y > 80 or pos.Y < -20
 
     if not isThirdFloor then
-        print("[3rd Floor] Not on 3rd floor, skipping platform")
         return
     end
-
-    print("[3rd Floor] Creating platform...")
 
     thirdFloorPlatform = Instance.new("Model")
     thirdFloorPlatform.Name = "ThirdFloorPlatform"
@@ -470,8 +447,6 @@ local function createThirdFloorPlatform()
         wall.Parent = thirdFloorPlatform
         table.insert(platformParts, wall)
     end
-
-    print("[3rd Floor] Platform created")
 end
 
 local function removeThirdFloorPlatform()
@@ -485,7 +460,6 @@ end
 -- ============================================================
 -- SXE TP COORDINATES SYSTEM
 -- ============================================================
-
 local UPPER = {
     B = {
         {coord=Vector3.new(-487.921448,16.850713,-75.768013), facing="NORTH"},
@@ -631,7 +605,6 @@ end
 -- ============================================================
 -- TP MOVEMENT SYSTEM
 -- ============================================================
-
 local function vZero(hrp)
     if hrp then
         hrp.AssemblyLinearVelocity = Vector3.zero
@@ -738,7 +711,7 @@ local function velMoveThrough(hrp, waypoints, speed)
 end
 
 -- ============================================================
--- CLONE TELEPORT (DOES FULL TP FIRST, THEN CLONES)
+-- CLONE TELEPORT
 -- ============================================================
 local function doFullTPThenClone(destPos, facingDir, petPos, target)
     local char = LocalPlayer.Character
@@ -850,6 +823,39 @@ local function doFullTPThenClone(destPos, facingDir, petPos, target)
 end
 
 -- ============================================================
+-- SELECTED PET TRACKING
+-- ============================================================
+local selectedPetUID = configData.selectedPet
+local petList = {}
+
+-- Function to get the target pet based on selection
+local function getTargetPet()
+    petList = scanPets()
+    if #petList == 0 then
+        return nil
+    end
+    
+    -- If we have a selected pet, try to find it
+    if selectedPetUID then
+        for _, pet in ipairs(petList) do
+            if pet.uid == selectedPetUID then
+                print("[TP] Using selected pet: " .. pet.name .. " (" .. pet.genText .. ")")
+                return pet
+            end
+        end
+        -- Selected pet not found, clear selection
+        print("[TP] Selected pet not found, clearing selection")
+        selectedPetUID = nil
+        configData.selectedPet = nil
+        saveConfig()
+    end
+    
+    -- Default to highest money pet
+    print("[TP] Using highest money pet: " .. petList[1].name .. " (" .. petList[1].genText .. ")")
+    return petList[1]
+end
+
+-- ============================================================
 -- MAIN TP FUNCTION
 -- ============================================================
 local isTeleporting = false
@@ -892,16 +898,10 @@ function TPNow()
             end
             
             print("[TP] Scanning for pets...")
-            local pets = scanPets()
-            if #pets == 0 then
-                ShowNotification("TP NOW", "No pets found!")
-                isTeleporting = false
-                return
-            end
+            local target = getTargetPet()
             
-            local target = pets[1]
-            if not target or not target.position then
-                ShowNotification("TP NOW", "No valid pet target")
+            if not target then
+                ShowNotification("TP NOW", "No pets found!")
                 isTeleporting = false
                 return
             end
@@ -971,21 +971,18 @@ function TPNow()
             print("[TP] Clone successful! Navigating to pet safely...")
             ShowNotification("TP NOW", "Walking to " .. target.name .. "...")
             
-            -- Get safe path avoiding other bases
             local startPos = hrp.Position
             local targetPos = Vector3.new(petPos.X, petPos.Y + 3, petPos.Z)
             local safePath = getSafePath(startPos, targetPos, target.plot)
             
             print("[TP] Safe path has " .. #safePath .. " waypoints")
             
-            -- Follow safe path
             for i = 1, #safePath - 1 do
                 local wpStart = safePath[i]
                 local wpEnd = safePath[i + 1]
                 local dist = (wpEnd - wpStart).Magnitude
                 
                 if dist > 0 then
-                    -- Move to each waypoint
                     local t0 = os.clock()
                     while hrp.Parent and os.clock() - t0 < (dist / 160) + 2 do
                         equipCarpet()
@@ -1101,19 +1098,15 @@ function ShowNotification(title, text)
 end
 
 -- ============================================
--- GUI - BIG TP NOW BUTTON WITH AUTO TP TOGGLE
+-- GUI - COMPLETE WITH STEAL PANEL
 -- ============================================
 task.spawn(function()
-    -- Wait for PlayerGui to be fully ready
     if not PlayerGui or not PlayerGui.Parent then
-        print("[GUI] Waiting for PlayerGui...")
         PlayerGui = waitForPlayerGui()
     end
     
-    -- Load config first
     loadConfig()
 
-    -- Ensure PlayerGui exists and is ready
     if not PlayerGui or not PlayerGui.Parent then
         PlayerGui = Instance.new("ScreenGui")
         PlayerGui.Name = "PlayerGui"
@@ -1122,7 +1115,6 @@ task.spawn(function()
         PlayerGui.Parent = LocalPlayer
     end
 
-    -- Wait a bit longer to ensure everything is ready
     task.wait(0.5)
 
     local gui = Instance.new("ScreenGui")
@@ -1131,9 +1123,10 @@ task.spawn(function()
     gui.IgnoreGuiInset = true
     gui.Parent = PlayerGui
 
+    -- Main frame - bigger to fit pet list
     local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 210, 0, 240)
-    frame.Position = UDim2.new(0.5, -100, 0.15, 0)
+    frame.Size = UDim2.new(0, 280, 0, 380)
+    frame.Position = UDim2.new(0.5, -140, 0.1, 0)
     frame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
     frame.BackgroundTransparency = 0.05
     frame.BorderSizePixel = 0
@@ -1147,7 +1140,7 @@ task.spawn(function()
     title.Size = UDim2.new(1, 0, 0, 30)
     title.Position = UDim2.new(0, 0, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "TP NOW"
+    title.Text = "STEAL PANEL"
     title.Font = Enum.Font.GothamBlack
     title.TextSize = 18
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1156,16 +1149,32 @@ task.spawn(function()
     subtitle.Size = UDim2.new(1, -20, 0, 20)
     subtitle.Position = UDim2.new(0, 10, 0, 32)
     subtitle.BackgroundTransparency = 1
-    subtitle.Text = "Auto-find best pet"
+    subtitle.Text = "Click a pet to select it, then TP"
     subtitle.Font = Enum.Font.GothamMedium
     subtitle.TextSize = 11
     subtitle.TextColor3 = Color3.fromRGB(160, 160, 180)
     subtitle.TextXAlignment = Enum.TextXAlignment.Center
 
+    -- Pet List Scrolling Frame
+    local scrollFrame = Instance.new("ScrollingFrame", frame)
+    scrollFrame.Size = UDim2.new(1, -20, 0, 140)
+    scrollFrame.Position = UDim2.new(0, 10, 0, 60)
+    scrollFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    scrollFrame.BackgroundTransparency = 0.3
+    scrollFrame.BorderSizePixel = 0
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scrollFrame.ScrollBarThickness = 4
+    scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(50, 50, 70)
+    Instance.new("UICorner", scrollFrame).CornerRadius = UDim.new(0, 8)
+
+    local petListLayout = Instance.new("UIListLayout", scrollFrame)
+    petListLayout.Padding = UDim.new(0, 2)
+    petListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
     -- TP NOW Button
     local btn = Instance.new("TextButton", frame)
     btn.Size = UDim2.new(1, -20, 0, 40)
-    btn.Position = UDim2.new(0, 10, 0, 60)
+    btn.Position = UDim2.new(0, 10, 0, 210)
     btn.BackgroundColor3 = Color3.fromRGB(52, 211, 153)
     btn.BackgroundTransparency = 0
     btn.Text = "TP NOW"
@@ -1188,13 +1197,13 @@ task.spawn(function()
 
     -- Auto TP Toggle
     local autoBtn = Instance.new("TextButton", frame)
-    autoBtn.Size = UDim2.new(1, -20, 0, 35)
-    autoBtn.Position = UDim2.new(0, 10, 0, 108)
+    autoBtn.Size = UDim2.new(0.48, -8, 0, 30)
+    autoBtn.Position = UDim2.new(0, 10, 0, 258)
     autoBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
     autoBtn.BackgroundTransparency = 0
-    autoBtn.Text = "AUTO TP: OFF"
+    autoBtn.Text = "AUTO: OFF"
     autoBtn.Font = Enum.Font.GothamMedium
-    autoBtn.TextSize = 13
+    autoBtn.TextSize = 11
     autoBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
     autoBtn.AutoButtonColor = false
     Instance.new("UICorner", autoBtn).CornerRadius = UDim.new(0, 8)
@@ -1217,14 +1226,14 @@ task.spawn(function()
         
         if autoTPEnabled then
             autoBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
-            autoBtn.Text = "AUTO TP: ON"
+            autoBtn.Text = "AUTO: ON"
             autoBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
             print("[AutoTP] Enabled")
             ShowNotification("AUTO TP", "Enabled - TPing every 15s")
             startAutoTP()
         else
             autoBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-            autoBtn.Text = "AUTO TP: OFF"
+            autoBtn.Text = "AUTO: OFF"
             autoBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
             print("[AutoTP] Disabled")
             ShowNotification("AUTO TP", "Disabled")
@@ -1235,23 +1244,22 @@ task.spawn(function()
         end
     end)
 
-    -- Auto TP On Load Toggle
+    -- Auto On Load Toggle
     local loadBtn = Instance.new("TextButton", frame)
-    loadBtn.Size = UDim2.new(1, -20, 0, 30)
-    loadBtn.Position = UDim2.new(0, 10, 0, 150)
+    loadBtn.Size = UDim2.new(0.48, -8, 0, 30)
+    loadBtn.Position = UDim2.new(0.52, 0, 0, 258)
     loadBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
     loadBtn.BackgroundTransparency = 0
-    loadBtn.Text = "AUTO ON LOAD: OFF"
+    loadBtn.Text = "ON LOAD: OFF"
     loadBtn.Font = Enum.Font.GothamMedium
     loadBtn.TextSize = 11
     loadBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
     loadBtn.AutoButtonColor = false
     Instance.new("UICorner", loadBtn).CornerRadius = UDim.new(0, 8)
 
-    -- Set initial state from config
     if configData.autoTPOnLoad then
         loadBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
-        loadBtn.Text = "AUTO ON LOAD: ON"
+        loadBtn.Text = "ON LOAD: ON"
         loadBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
     end
 
@@ -1272,12 +1280,12 @@ task.spawn(function()
         
         if configData.autoTPOnLoad then
             loadBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
-            loadBtn.Text = "AUTO ON LOAD: ON"
+            loadBtn.Text = "ON LOAD: ON"
             loadBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
             ShowNotification("AUTO ON LOAD", "Will TP on script load")
         else
             loadBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-            loadBtn.Text = "AUTO ON LOAD: OFF"
+            loadBtn.Text = "ON LOAD: OFF"
             loadBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
             ShowNotification("AUTO ON LOAD", "Disabled")
         end
@@ -1286,7 +1294,7 @@ task.spawn(function()
     -- Status label
     local status = Instance.new("TextLabel", frame)
     status.Size = UDim2.new(1, -20, 0, 20)
-    status.Position = UDim2.new(0, 10, 0, 188)
+    status.Position = UDim2.new(0, 10, 0, 296)
     status.BackgroundTransparency = 1
     status.Text = "Ready"
     status.Font = Enum.Font.GothamMedium
@@ -1297,7 +1305,7 @@ task.spawn(function()
     -- Floor indicator
     local floorLabel = Instance.new("TextLabel", frame)
     floorLabel.Size = UDim2.new(1, -20, 0, 18)
-    floorLabel.Position = UDim2.new(0, 10, 0, 212)
+    floorLabel.Position = UDim2.new(0, 10, 0, 320)
     floorLabel.BackgroundTransparency = 1
     floorLabel.Text = "Floor: Ground"
     floorLabel.Font = Enum.Font.GothamMedium
@@ -1305,8 +1313,150 @@ task.spawn(function()
     floorLabel.TextColor3 = Color3.fromRGB(60, 60, 80)
     floorLabel.TextXAlignment = Enum.TextXAlignment.Center
 
+    -- Selection label
+    local selectionLabel = Instance.new("TextLabel", frame)
+    selectionLabel.Size = UDim2.new(1, -20, 0, 18)
+    selectionLabel.Position = UDim2.new(0, 10, 0, 340)
+    selectionLabel.BackgroundTransparency = 1
+    selectionLabel.Text = "Selected: None"
+    selectionLabel.Font = Enum.Font.GothamMedium
+    selectionLabel.TextSize = 9
+    selectionLabel.TextColor3 = Color3.fromRGB(100, 200, 150)
+    selectionLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+    -- Function to update pet list
+    local function updatePetList()
+        -- Clear existing pet buttons
+        for _, child in ipairs(scrollFrame:GetChildren()) do
+            if child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end
+        
+        local pets = scanPets()
+        local canvasHeight = 0
+        
+        if #pets == 0 then
+            local empty = Instance.new("TextLabel", scrollFrame)
+            empty.Size = UDim2.new(1, -10, 0, 30)
+            empty.BackgroundTransparency = 1
+            empty.Text = "No pets found"
+            empty.Font = Enum.Font.GothamMedium
+            empty.TextSize = 12
+            empty.TextColor3 = Color3.fromRGB(100, 100, 120)
+            empty.TextXAlignment = Enum.TextXAlignment.Center
+            canvasHeight = 30
+        else
+            for i, pet in ipairs(pets) do
+                local isSelected = (selectedPetUID == pet.uid)
+                
+                local petBtn = Instance.new("TextButton", scrollFrame)
+                petBtn.Size = UDim2.new(1, -10, 0, 28)
+                petBtn.BackgroundColor3 = isSelected and Color3.fromRGB(30, 80, 60) or Color3.fromRGB(20, 20, 30)
+                petBtn.BackgroundTransparency = 0.2
+                petBtn.BorderSizePixel = 0
+                petBtn.Text = ""
+                petBtn.AutoButtonColor = false
+                Instance.new("UICorner", petBtn).CornerRadius = UDim.new(0, 6)
+                
+                if isSelected then
+                    local border = Instance.new("UIStroke", petBtn)
+                    border.Color = Color3.fromRGB(100, 255, 150)
+                    border.Thickness = 1
+                end
+                
+                -- Pet name label
+                local nameLabel = Instance.new("TextLabel", petBtn)
+                nameLabel.Size = UDim2.new(0.5, -5, 1, 0)
+                nameLabel.Position = UDim2.new(0, 5, 0, 0)
+                nameLabel.BackgroundTransparency = 1
+                nameLabel.Text = pet.name
+                nameLabel.Font = Enum.Font.GothamMedium
+                nameLabel.TextSize = 11
+                nameLabel.TextColor3 = isSelected and Color3.fromRGB(200, 255, 200) or Color3.fromRGB(180, 180, 200)
+                nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+                
+                -- Pet value label
+                local valueLabel = Instance.new("TextLabel", petBtn)
+                valueLabel.Size = UDim2.new(0.3, -5, 1, 0)
+                valueLabel.Position = UDim2.new(0.5, 0, 0, 0)
+                valueLabel.BackgroundTransparency = 1
+                valueLabel.Text = pet.genText
+                valueLabel.Font = Enum.Font.GothamMedium
+                valueLabel.TextSize = 11
+                valueLabel.TextColor3 = isSelected and Color3.fromRGB(200, 255, 150) or Color3.fromRGB(100, 200, 100)
+                valueLabel.TextXAlignment = Enum.TextXAlignment.Center
+                
+                -- Selection indicator
+                local selectIndicator = Instance.new("TextLabel", petBtn)
+                selectIndicator.Size = UDim2.new(0.2, -5, 1, 0)
+                selectIndicator.Position = UDim2.new(0.8, 0, 0, 0)
+                selectIndicator.BackgroundTransparency = 1
+                selectIndicator.Text = isSelected and "✓ SELECTED" or "CLICK"
+                selectIndicator.Font = Enum.Font.GothamMedium
+                selectIndicator.TextSize = 9
+                selectIndicator.TextColor3 = isSelected and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(80, 80, 100)
+                selectIndicator.TextXAlignment = Enum.TextXAlignment.Right
+                
+                -- Click handler
+                petBtn.MouseButton1Click:Connect(function()
+                    if selectedPetUID == pet.uid then
+                        -- Deselect
+                        selectedPetUID = nil
+                        configData.selectedPet = nil
+                        ShowNotification("SELECTION", "Deselected " .. pet.name)
+                    else
+                        -- Select
+                        selectedPetUID = pet.uid
+                        configData.selectedPet = pet.uid
+                        ShowNotification("SELECTION", "Selected " .. pet.name .. " (" .. pet.genText .. ")")
+                    end
+                    saveConfig()
+                    updatePetList()
+                end)
+                
+                petBtn.MouseEnter:Connect(function()
+                    petBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+                end)
+                petBtn.MouseLeave:Connect(function()
+                    if selectedPetUID == pet.uid then
+                        petBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 60)
+                    else
+                        petBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+                    end
+                end)
+                
+                canvasHeight = canvasHeight + 30
+            end
+        end
+        
+        scrollFrame.CanvasSize = UDim2.new(0, 0, 0, canvasHeight + 10)
+        
+        -- Update selection label
+        if selectedPetUID then
+            for _, pet in ipairs(pets) do
+                if pet.uid == selectedPetUID then
+                    selectionLabel.Text = "Selected: " .. pet.name .. " (" .. pet.genText .. ")"
+                    selectionLabel.TextColor3 = Color3.fromRGB(100, 255, 150)
+                    break
+                end
+            end
+        else
+            selectionLabel.Text = "Selected: None (using highest value)"
+            selectionLabel.TextColor3 = Color3.fromRGB(150, 150, 180)
+        end
+    end
+
+    -- Update pet list every 2 seconds
     task.spawn(function()
-        -- If autoTPOnLoad is enabled, run TP after 3 seconds
+        while gui.Parent do
+            updatePetList()
+            task.wait(2)
+        end
+    end)
+
+    -- Status update loop
+    task.spawn(function()
         if configData.autoTPOnLoad then
             print("[Config] Auto TP on load enabled, will TP in 3 seconds...")
             task.wait(3)
@@ -1316,7 +1466,7 @@ task.spawn(function()
             end
         end
         
-        while true do
+        while gui.Parent do
             if isTeleporting then
                 status.Text = "Teleporting..."
                 status.TextColor3 = Color3.fromRGB(255, 150, 100)
@@ -1329,10 +1479,16 @@ task.spawn(function()
             else
                 local pets = scanPets()
                 if #pets > 0 then
-                    status.Text = "Best: " .. pets[1].name .. " (" .. pets[1].genText .. ")"
-                    status.TextColor3 = Color3.fromRGB(160, 160, 180)
+                    local target = getTargetPet()
+                    if target then
+                        status.Text = "Target: " .. target.name .. " (" .. target.genText .. ")"
+                        status.TextColor3 = Color3.fromRGB(160, 160, 180)
+                    else
+                        status.Text = "Scanning..."
+                        status.TextColor3 = Color3.fromRGB(80, 80, 100)
+                    end
                 else
-                    status.Text = "Scanning..."
+                    status.Text = "No pets found"
                     status.TextColor3 = Color3.fromRGB(80, 80, 100)
                 end
             end
@@ -1388,4 +1544,4 @@ task.spawn(function()
     end)
 end)
 
-print("[TP NOW] Loaded! Config saved, auto TP on load, safe pathfinding around bases.")
+print("[TP NOW] STEAL PANEL Loaded! Click a pet to select it, or use highest value by default.")
