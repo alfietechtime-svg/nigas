@@ -1,4 +1,3 @@
-```lua
 --[[
     TP NOW
     Cleaned / fixed Roblox Luau version
@@ -1966,4 +1965,3 @@ task.spawn(function()
 end)
 
 print("[TP NOW] Loaded successfully")
-```
